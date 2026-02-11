@@ -1,48 +1,68 @@
-import pandas as pd
-import json
 import os
+import json
+from pathlib import Path
 
-from telegram import (
-    Update,
-    ReplyKeyboardMarkup,
-    InlineKeyboardMarkup,
-    InlineKeyboardButton
-)
+import pandas as pd
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    CallbackQueryHandler,
-    filters
-)
-
-TOKEN = "8539913683:AAHx6_ByvA_OWZ1T03xJKwBwtgje-sbsJn8"
+# Лучше хранить токен в переменной окружения BOT_TOKEN (Render -> Environment).
+# Оставлен fallback, чтобы у тебя запускалось "как есть".
+TOKEN = os.getenv("BOT_TOKEN", "8539913683:AAHx6_ByvA_OWZ1T03xJKwBwtgje-sbsJn8")
 
 PLAYERS_FILE = "players.xlsx"
-SELECTED_FILE = "selected_players.json"
 
-# ---------------------------
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
-# ---------------------------
+# Админы: могут загружать Excel + управлять пользователями
+ADMIN_IDS = {199804073}
 
-def load_players():
-    if not os.path.exists(PLAYERS_FILE):
-        return []
-    df = pd.read_excel(PLAYERS_FILE, sheet_name="Игроки")
-    return df["Игрок"].dropna().tolist()
+# JSON-файл со списком разрешённых пользователей
+# ВАЖНО: чтобы сохранялось между перезапусками на Render — нужен Persistent Disk.
+USERS_DB_FILE = "allowed_users.json"
 
-def load_selected():
-    if not os.path.exists(SELECTED_FILE):
-        return []
-    with open(SELECTED_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+MIN_PLAYERS_TO_CREATE_TEAMS = 8
 
-def save_selected(players):
-    with open(SELECTED_FILE, "w", encoding="utf-8") as f:
-        json.dump(players, f, ensure_ascii=False)
+# --- runtime ---
+selected_players = set()
+players_list = []
 
+
+# ---------- Users storage ----------
+def load_allowed_users() -> set[int]:
+    """Load allowed users from JSON. Always includes admins."""
+    try:
+        p = Path(USERS_DB_FILE)
+        if not p.exists():
+            return set(ADMIN_IDS)
+
+        data = json.loads(p.read_text(encoding="utf-8"))
+        ids = set(int(x) for x in data.get("allowed_users", []))
+        ids |= set(ADMIN_IDS)
+        return ids
+    except Exception:
+        # fail-safe: только админы
+        return set(ADMIN_IDS)
+
+
+def save_allowed_users(allowed: set[int]) -> None:
+    p = Path(USERS_DB_FILE)
+    payload = {"allowed_users": sorted(set(allowed) | set(ADMIN_IDS))}
+    p.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+ALLOWED_USERS = load_allowed_users()
+
+
+def is_admin(update: Update) -> bool:
+    uid = update.effective_user.id if update.effective_user else 0
+    return uid in ADMIN_IDS
+
+
+def is_allowed(update: Update) -> bool:
+    uid = update.effective_user.id if update.effective_user else 0
+    return uid in ADMIN_IDS or uid in ALLOWED_USERS
+
+
+# ---------- Ratings ----------
 def calculate_rating(row):
     skills = [
         "Техника владения мячом",
@@ -51,187 +71,230 @@ def calculate_rating(row):
         "Точность ударов и передач",
         "Принятие решений",
         "Защита",
-        "На воротах"
+        "На воротах",
     ]
     return row[skills].mean()
 
-# ---------------------------
-# СТАРТ
-# ---------------------------
 
+# ---------- UI helpers ----------
+def main_keyboard_for(update: Update) -> ReplyKeyboardMarkup:
+    if is_admin(update):
+        keyboard = [
+            ["Загрузить Excel"],
+            ["Выбрать игроков на матч"],
+            ["Сформировать составы"],
+            ["👑 Пользователи: добавить", "👑 Пользователи: удалить"],
+            ["👑 Пользователи: список"],
+        ]
+    else:
+        keyboard = [
+            ["Выбрать игроков на матч"],
+            ["Сформировать составы"],
+        ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+
+def players_keyboard() -> ReplyKeyboardMarkup:
+    keyboard = []
+    row = []
+
+    for name in players_list:
+        row.append(KeyboardButton(name))
+        if len(row) == 3:
+            keyboard.append(row)
+            row = []
+
+    if row:
+        keyboard.append(row)
+
+    keyboard.append(["Сформировать составы"])
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+
+# ---------- Handlers ----------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [
-        ["👥 Выбрать игроков на матч"],
-        ["📥 Загрузить новый список"]
-    ]
-    await update.message.reply_text(
-        "Готов к работе ⚽",
-        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    )
+    if not is_allowed(update):
+        await update.message.reply_text("У тебя нет доступа к этому боту. Напиши администратору.")
+        return
 
-# ---------------------------
-# ЗАГРУЗКА EXCEL
-# ---------------------------
+    # сброс режимов ввода (если были)
+    context.user_data.pop("awaiting_add_user", None)
+    context.user_data.pop("awaiting_remove_user", None)
+
+    await update.message.reply_text("Готов к работе ✅", reply_markup=main_keyboard_for(update))
+
 
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # только админ может обновлять Excel
+    if not is_admin(update):
+        await update.message.reply_text("Только админ может обновлять список игроков.")
+        return
+
+    global players_list, selected_players
+
     document = update.message.document
     file = await document.get_file()
     await file.download_to_drive(PLAYERS_FILE)
 
-    await update.message.reply_text("Список игроков обновлён ✅")
-
-# ---------------------------
-# ПОКАЗ ЧЕКБОКСОВ
-# ---------------------------
-
-async def show_players(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    players = load_players()
-
-    if not players:
-        await update.message.reply_text(
-            "Список игроков не найден. Сначала загрузите Excel."
-        )
-        return
-
-    selected = load_selected()
-
-    keyboard = []
-    for p in players:
-        mark = "☑" if p in selected else "☐"
-        keyboard.append([
-            InlineKeyboardButton(f"{mark} {p}", callback_data=f"toggle|{p}")
-        ])
-
-    keyboard.append([InlineKeyboardButton("✅ Готово", callback_data="done")])
+    df = pd.read_excel(PLAYERS_FILE, sheet_name="Игроки")
+    players_list = df["Игрок"].dropna().astype(str).tolist()
+    selected_players = set()
 
     await update.message.reply_text(
-        "Выбери игроков:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        "Файл обновлён ✅\nТеперь нажми «Выбрать игроков на матч».",
+        reply_markup=main_keyboard_for(update),
     )
 
-# ---------------------------
-# ПЕРЕКЛЮЧЕНИЕ ЧЕКБОКСОВ
-# ---------------------------
 
-async def toggle_player(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+async def choose_players(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        return
 
-    _, player = query.data.split("|")
+    if not players_list:
+        if is_admin(update):
+            await update.message.reply_text(
+                "Список игроков ещё не загружен. Нажми «Загрузить Excel» и пришли файл.",
+                reply_markup=main_keyboard_for(update),
+            )
+        else:
+            await update.message.reply_text(
+                "Список игроков ещё не загружен. Попроси админа загрузить Excel.",
+                reply_markup=main_keyboard_for(update),
+            )
+        return
 
-    selected = load_selected()
-
-    if player in selected:
-        selected.remove(player)
-    else:
-        selected.append(player)
-
-    save_selected(selected)
-
-    # перерисовываем список
-    players = load_players()
-
-    keyboard = []
-    for p in players:
-        mark = "☑" if p in selected else "☐"
-        keyboard.append([
-            InlineKeyboardButton(f"{mark} {p}", callback_data=f"toggle|{p}")
-        ])
-
-    keyboard.append([InlineKeyboardButton("✅ Готово", callback_data="done")])
-
-    await query.edit_message_reply_markup(
-        reply_markup=InlineKeyboardMarkup(keyboard)
+    await update.message.reply_text(
+        "Выбери игроков (нажимай по именам). Повторное нажатие снимает выбор.",
+        reply_markup=players_keyboard(),
     )
 
-# ---------------------------
-# ГОТОВО → ПОКАЗАТЬ КНОПКУ СОСТАВОВ
-# ---------------------------
 
-async def done_select(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+async def users_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update):
+        return
+    allowed = sorted(load_allowed_users())
+    txt = "👑 Разрешённые пользователи (ID):\n" + "\n".join(str(x) for x in allowed)
+    await update.message.reply_text(txt, reply_markup=main_keyboard_for(update))
 
-    keyboard = [
-        [InlineKeyboardButton("⚙️ Сформировать составы", callback_data="make_teams")]
-    ]
-
-    await query.edit_message_text(
-        "Состав сохранён 👌",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-# ---------------------------
-# СПРОСИТЬ КОЛИЧЕСТВО КОМАНД
-# ---------------------------
-
-async def ask_team_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    keyboard = [
-        [
-            InlineKeyboardButton("⚽ 2", callback_data="teams|2"),
-            InlineKeyboardButton("⚽ 3", callback_data="teams|3"),
-            InlineKeyboardButton("⚽ 4", callback_data="teams|4"),
-        ]
-    ]
-
-    await query.edit_message_text(
-        "Сколько команд сделать?",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-# ---------------------------
-# ДЕЛЕНИЕ НА КОМАНДЫ
-# ---------------------------
 
 async def create_teams(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+    if not is_allowed(update):
+        return
 
-    team_count = int(query.data.split("|")[1])
+    if len(selected_players) < MIN_PLAYERS_TO_CREATE_TEAMS:
+        await update.message.reply_text(f"Нужно минимум {MIN_PLAYERS_TO_CREATE_TEAMS} игроков.")
+        return
 
-    selected = load_selected()
     df = pd.read_excel(PLAYERS_FILE, sheet_name="Игроки")
-
-    df = df[df["Игрок"].isin(selected)].copy()
     df["rating"] = df.apply(calculate_rating, axis=1)
+
+    df = df[df["Игрок"].astype(str).isin({str(x) for x in selected_players})]
     df = df.sort_values(by="rating", ascending=False)
 
-    teams = [[] for _ in range(team_count)]
-    scores = [0] * team_count
+    team1 = []
+    team2 = []
+    s1 = 0.0
+    s2 = 0.0
 
-    for _, row in df.iterrows():
-        idx = scores.index(min(scores))
-        teams[idx].append((row["Игрок"], row["rating"]))
-        scores[idx] += row["rating"]
+    for _, p in df.iterrows():
+        if s1 <= s2:
+            team1.append(p)
+            s1 += float(p["rating"])
+        else:
+            team2.append(p)
+            s2 += float(p["rating"])
 
-    text = ""
-    for i, team in enumerate(teams):
-        text += f"\n🔴 Команда {i+1}\n"
-        for name, r in team:
-            text += f"{name} ({round(r,1)})\n"
-        text += f"Сила: {round(scores[i],1)}\n"
+    text = f"🔵 Команда 1 (рейтинг: {round(s1, 1)})\n"
+    for p in team1:
+        text += f"- {p['Игрок']}\n"
 
-    await query.edit_message_text(text)
+    text += f"\n🟢 Команда 2 (рейтинг: {round(s2, 1)})\n"
+    for p in team2:
+        text += f"- {p['Игрок']}\n"
 
-# ---------------------------
-# ОБРАБОТКА ТЕКСТА
-# ---------------------------
+    await update.message.reply_text(text, reply_markup=main_keyboard_for(update))
+
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
+    global selected_players, ALLOWED_USERS
 
-    if text == "👥 Выбрать игроков на матч":
-        await show_players(update, context)
+    if not update.message:
+        return
 
-    elif text == "📥 Загрузить новый список":
-        await update.message.reply_text("Отправь Excel файл")
+    text = (update.message.text or "").strip()
 
-# ---------------------------
-# MAIN
-# ---------------------------
+    if not is_allowed(update):
+        await update.message.reply_text("У тебя нет доступа к этому боту. Напиши администратору.")
+        return
+
+    # --- admin add/remove flow (ждём ID как текст) ---
+    if is_admin(update) and context.user_data.get("awaiting_add_user"):
+        try:
+            uid = int(text)
+            ALLOWED_USERS = load_allowed_users()
+            ALLOWED_USERS.add(uid)
+            save_allowed_users(ALLOWED_USERS)
+            context.user_data.pop("awaiting_add_user", None)
+            await update.message.reply_text(f"✅ Добавил пользователя: {uid}", reply_markup=main_keyboard_for(update))
+        except Exception:
+            await update.message.reply_text("Не похоже на ID. Пришли число, например: 123456789")
+        return
+
+    if is_admin(update) and context.user_data.get("awaiting_remove_user"):
+        try:
+            uid = int(text)
+            if uid in ADMIN_IDS:
+                await update.message.reply_text("Админа удалить нельзя 🙂")
+                return
+            ALLOWED_USERS = load_allowed_users()
+            if uid in ALLOWED_USERS:
+                ALLOWED_USERS.remove(uid)
+                save_allowed_users(ALLOWED_USERS)
+                await update.message.reply_text(f"✅ Удалил пользователя: {uid}", reply_markup=main_keyboard_for(update))
+            else:
+                await update.message.reply_text("Такого ID нет в списке.", reply_markup=main_keyboard_for(update))
+            context.user_data.pop("awaiting_remove_user", None)
+        except Exception:
+            await update.message.reply_text("Не похоже на ID. Пришли число, например: 123456789")
+        return
+
+    # --- кнопки ---
+    if text == "Загрузить Excel":
+        if not is_admin(update):
+            await update.message.reply_text("Только админ может обновлять список игроков.")
+            return
+        await update.message.reply_text("Пришли Excel файл (players.xlsx).")
+
+    elif text == "Выбрать игроков на матч":
+        await choose_players(update, context)
+
+    elif text == "Сформировать составы":
+        await create_teams(update, context)
+
+    elif text == "👑 Пользователи: список":
+        await users_list(update, context)
+
+    elif text == "👑 Пользователи: добавить":
+        if not is_admin(update):
+            return
+        context.user_data["awaiting_add_user"] = True
+        context.user_data.pop("awaiting_remove_user", None)
+        await update.message.reply_text("Отправь Telegram ID пользователя, которого нужно ДОБАВИТЬ.")
+
+    elif text == "👑 Пользователи: удалить":
+        if not is_admin(update):
+            return
+        context.user_data["awaiting_remove_user"] = True
+        context.user_data.pop("awaiting_add_user", None)
+        await update.message.reply_text("Отправь Telegram ID пользователя, которого нужно УДАЛИТЬ.")
+
+    # --- выбор игрока ---
+    elif text in players_list:
+        if text in selected_players:
+            selected_players.remove(text)
+        else:
+            selected_players.add(text)
+
 
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
@@ -240,12 +303,8 @@ def main():
     app.add_handler(MessageHandler(filters.Document.ALL, handle_file))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    app.add_handler(CallbackQueryHandler(toggle_player, pattern="^toggle"))
-    app.add_handler(CallbackQueryHandler(done_select, pattern="^done$"))
-    app.add_handler(CallbackQueryHandler(ask_team_count, pattern="^make_teams$"))
-    app.add_handler(CallbackQueryHandler(create_teams, pattern="^teams"))
-
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
