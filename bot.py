@@ -2,7 +2,7 @@ import logging import pandas as pd from telegram import Update,
 ReplyKeyboardMarkup from telegram.ext import ApplicationBuilder,
 CommandHandler, MessageHandler, filters, ContextTypes
 
-TOKEN = “8539913683:AAHx6_ByvA_OWZ1T03xJKwBwtgje-sbsJn8”
+TOKEN = "8539913683:AAHx6_ByvA_OWZ1T03xJKwBwtgje-sbsJn8"
 
 PLAYERS_FILE = “players.xlsx”
 
