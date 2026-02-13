@@ -24,9 +24,7 @@ from telegram.ext import (
 # =========================
 # CONFIG
 # =========================
-TOKEN = os.getenv("8539913683:AAHx6_ByvA_OWZ1T03xJKwBwtgje-sbsJn8")
-if not TOKEN:
-    raise RuntimeError("BOT_TOKEN env var is not set")
+TOKEN = "8539913683:AAHx6_ByvA_OWZ1T03xJKwBwtgje-sbsJn8"
 
 DATA_DIR = os.getenv("DATA_DIR", ".")
 PLAYERS_FILE = os.path.join(DATA_DIR, "players.xlsx")
@@ -42,7 +40,7 @@ PAGE_SIZE = 24
 TEAM_EMOJIS = ["🔵", "🟢", "🟣", "🟠"]
 
 # =========================
-# Dummy HTTP server (Render Web only)
+# Dummy HTTP server (для Render Web)
 # =========================
 def _run_dummy_port_server():
     port = int(os.getenv("PORT", "10000"))
@@ -255,9 +253,6 @@ async def render_picker(update, context, reset_page=False):
     )
 
 
-# =========================
-# CALLBACKS
-# =========================
 async def on_callback(update, context):
     query = update.callback_query
     await query.answer()
@@ -326,9 +321,6 @@ async def on_callback(update, context):
     await query.edit_message_reply_markup(reply_markup=kb)
 
 
-# =========================
-# HANDLERS
-# =========================
 async def start(update, context):
     uid = update.effective_user.id
     if not is_allowed(uid):
@@ -344,9 +336,6 @@ async def handle_text(update, context):
         await render_picker(update, context, reset_page=True)
 
 
-# =========================
-# MAIN
-# =========================
 def main():
     load_users()
     if not os.path.exists(PLAYERS_CACHE):
