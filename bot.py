@@ -22,12 +22,6 @@ DEFAULT_ADMIN_ID = 199804073 MIN_PLAYERS = 8 PAGE_SIZE = 24
 
 TEAM_EMOJIS = [“🔵”, “🟢”, “🟣”, “🟠”]
 
-=========================
-
-Dummy HTTP server (Render)
-
-=========================
-
 def _run_dummy_port_server(): port = int(os.getenv(“PORT”, “10000”))
 
     class Handler(BaseHTTPRequestHandler):
@@ -40,12 +34,6 @@ def _run_dummy_port_server(): port = int(os.getenv(“PORT”, “10000”))
             return
 
     HTTPServer(("0.0.0.0", port), Handler).serve_forever()
-
-=========================
-
-JSON helpers
-
-=========================
 
 def _load_json(path: str, default): try: with open(path, “r”,
 encoding=“utf-8”) as f: return json.load(f) except: return default
@@ -62,12 +50,6 @@ players})
 def load_selections(): return _load_json(SELECTIONS_FILE, {})
 
 def save_selections(data): _save_json(SELECTIONS_FILE, data)
-
-=========================
-
-Ratings
-
-=========================
 
 SKILLS = [ “Техника владения мячом”, “Скорость и ускорение”,
 “Выносливость”, “Точность ударов и передач”, “Принятие решений”,
@@ -87,16 +69,8 @@ _ in range(team_count)]
 
     return teams, sums
 
-=========================
-
-UI
-
-=========================
-
 def main_menu_keyboard(): kb = [ [“⚽ Выбрать игроков”], [“📥 Загрузить
 Excel”], ] return ReplyKeyboardMarkup(kb, resize_keyboard=True)
-
-Игроки в 1 столбец
 
 def build_players_inline_keyboard(players, selected, page, team_count):
 total = len(players) pages = max(1, (total + PAGE_SIZE - 1) //
@@ -124,12 +98,6 @@ PAGE_SIZE]
 
     return InlineKeyboardMarkup(rows)
 
-=========================
-
-START
-
-=========================
-
 async def start(update, context): players = load_players_list()
 
     if not players:
@@ -143,12 +111,6 @@ async def start(update, context): players = load_players_list()
         )
     else:
         await update.message.reply_text("Готов к работе ⚽", reply_markup=main_menu_keyboard())
-
-=========================
-
-TEXT HANDLER
-
-=========================
 
 async def handle_text(update, context): text = update.message.text
 
@@ -164,14 +126,7 @@ async def handle_text(update, context): text = update.message.text
         st = selections.get(chat_key, {"selected": [], "team_count": 2, "page": 0})
 
         kb = build_players_inline_keyboard(players, set(st["selected"]), 0, st["team_count"])
-
         await update.message.reply_text("Выберите игроков:", reply_markup=kb)
-
-=========================
-
-EXCEL UPLOAD
-
-=========================
 
 async def handle_file(update, context): doc = update.message.document
 tg_file = await doc.get_file() await
@@ -188,12 +143,6 @@ tg_file.download_to_drive(PLAYERS_FILE)
 
     await update.message.reply_text(f"Загружено игроков: {len(players)}")
 
-=========================
-
-CALLBACK
-
-=========================
-
 async def on_callback(update, context): query = update.callback_query
 await query.answer()
 
@@ -205,7 +154,6 @@ await query.answer()
 
     selected = set(st["selected"])
     team_count = st["team_count"]
-
     players = load_players_list()
 
     if data.startswith("tgl|"):
@@ -248,12 +196,6 @@ await query.answer()
 
     kb = build_players_inline_keyboard(players, selected, 0, team_count)
     await query.edit_message_reply_markup(reply_markup=kb)
-
-=========================
-
-MAIN
-
-=========================
 
 def main(): if os.getenv(“PORT”):
 threading.Thread(target=_run_dummy_port_server, daemon=True).start()
